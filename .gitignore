@@ -1,0 +1,32 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+server.js
+*.tsbuildinfo
+
+# Runtime state (admin credentials + tunnels) — NEVER commit
+data
+vendor
+.env
+.env.local
+.env.*.local
+
+# AnyTLS binaries are downloaded at runtime
+anytls-server
+anytls-server.exe
+anytls-client
+anytls-client.exe
+
+# Packages / logs
+*.zip
+*.log
+npm-debug.log*
+logs
+
+# Editors & OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db

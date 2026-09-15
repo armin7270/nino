@@ -1,0 +1,25 @@
+# ==============================================================================
+# Nixpacks fallback build definition.
+#
+# railway.json selects the Dockerfile builder by default; this file only takes
+# effect if the service is switched to the "Nixpacks" builder in Railway.
+# Nixpacks has no multi-stage image, so the anytls-server binary is downloaded by
+# the panel itself on first boot (see ANYTLS_AUTO_DOWNLOAD in server.ts).
+# ==============================================================================
+[phases.setup]
+nixPkgs = ["nodejs_22", "curl", "cacert"]
+
+[phases.install]
+cmds = ["npm install --no-audit --no-fund"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "node dist/server.cjs"
+
+[variables]
+NODE_ENV = "production"
+ANYTLS_GATEWAY_PORT = "8443"
+DATA_DIR = "/app/data"
+ANYTLS_AUTO_DOWNLOAD = "true"
