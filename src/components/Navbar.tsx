@@ -58,19 +58,19 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Brand & Logo */}
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500 text-black font-bold shadow-lg shadow-amber-500/10">
-            A
+            N
           </div>
           <div>
             <div className="flex items-center gap-2">
               <span className="font-semibold tracking-tight text-white sm:text-lg font-mono">
-                AnyTLS <span className="text-amber-500">Panel</span>
+                Nino <span className="text-amber-500">Panel</span>
               </span>
               <span className="text-xs font-medium text-amber-500 bg-white/5 border border-white/5 px-2.5 py-0.5 rounded-full">
                 Server Manager
               </span>
             </div>
             <p className="hidden text-xs text-white/40 sm:block">
-              Linux AnyTLS Server Administration
+              System Administration & Metrics
             </p>
           </div>
         </div>

@@ -23,14 +23,13 @@ if [ ! -w "$VENDOR_DIR" ]; then
 fi
 
 if [ ! -w "$DATA_DIR" ]; then
-  echo "[entrypoint] WARNING: $DATA_DIR is not writable; panel settings and" >&2
-  echo "[entrypoint]          tunnels will not survive a redeploy." >&2
+  echo "[entrypoint] WARNING: $DATA_DIR is not writable; settings will not survive a redeploy." >&2
 fi
 
 if [ -x /usr/local/bin/anytls-server ]; then
-  echo "[entrypoint] anytls-server: $(/usr/local/bin/anytls-server --version 2>&1 | head -n1 || echo present)"
+  echo "[entrypoint] Core engine ready."
 else
-  echo "[entrypoint] anytls-server not baked in; the panel will download it on demand."
+  echo "[entrypoint] Core engine will be fetched on demand."
 fi
 
 exec "$@"

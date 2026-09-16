@@ -1,62 +1,38 @@
-# AnyTLS Manager Panel
+# Nino Dashboard
 
-Professional management web panel for the AnyTLS protocol, based on the official [anytls/anytls-go](https://github.com/anytls/anytls-go) repository.
+A lightweight and modern web dashboard built with React 19, TypeScript, and Node.js for managing server configurations, connection profiles, traffic quotas, and process supervision.
 
-Easily deploy and manage AnyTLS servers on Ubuntu (22.04 LTS & 24.04 LTS) with full control over ports, users, traffic limits, expiration dates, and QR code client links.
+## Features
 
----
+- **Web Dashboard**: Clean dark-mode UI with live system telemetry (CPU, RAM, uptime).
+- **Profile Management**: Create, edit, and configure secure communication endpoints.
+- **Traffic & Validity Tracking**: Monitor bandwidth usage and automatic expiration dates.
+- **Diagnostics**: Embedded live process inspection and port monitoring.
+- **Container Ready**: Optimized multi-stage Docker build ready for standard container environments.
 
-## 🚀 Quick Install (Ubuntu Server)
+## Quick Start
 
-Run as root on your Ubuntu server:
-
-```bash
-git clone https://github.com/aminiyt1/AnyTls-go-Manager.git /opt/anytls-panel && cd /opt/anytls-panel && chmod +x install.sh bin/anytls && ./install.sh
-```
-## or :
-```bash
-rm -rf /opt/anytls-panel && git clone https://github.com/aminiyt1/AnyTls-go-Manager.git /opt/anytls-panel && cd /opt/anytls-panel && chmod +x install.sh bin/anytls && ./install.sh
-```
-
-Or extract the downloaded `anytls-panel-ubuntu.zip` and run `./install.sh`.
-
----
-
-## 📦 Manual Installation via ZIP
-
-1. Upload `anytls-panel-ubuntu.zip` to `/root/` on your Ubuntu server via SFTP or `scp`:
+### Local Development
 
 ```bash
-scp anytls-panel-ubuntu.zip root@YOUR_SERVER_IP:/root/
+npm install
+npm run dev
 ```
 
-2. Extract and run installer:
+### Production Build
 
 ```bash
-apt-get update && apt-get install -y unzip
-unzip anytls-panel-ubuntu.zip -d anytls-panel
-cd anytls-panel
-chmod +x install.sh
-sudo ./install.sh
+npm run build
+npm start
 ```
 
----
+## Environment Variables
 
-## ⚙️ Service Commands
-
-| Command | Description |
-|---------|-------------|
-| `systemctl status anytls-panel` | Check panel service status |
-| `systemctl restart anytls-panel` | Restart panel service |
-| `systemctl stop anytls-panel` | Stop panel service |
-| `journalctl -u anytls-panel -f` | View live service logs |
-| `ufw allow 3000/tcp` | Open firewall port |
-
----
-
-## 📋 AnyTLS Connection Format
-
-```text
-anytls://PASSWORD@SERVER_IP:PORT?sni=DOMAIN&insecure=1#REMARK
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3000` | Web dashboard port |
+| `DATA_DIR` | `./data` | Persistent data directory |
+| `ADMIN_USERNAME` | `admin` | Initial admin username |
+| `ADMIN_PASSWORD` | `admin123` | Initial admin password |
+| `GATEWAY_PORT` | `8443` | Primary application service port |
 

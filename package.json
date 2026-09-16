@@ -1,9 +1,9 @@
 {
-  "name": "anytls-manager-panel",
+  "name": "nino-service",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "AnyTLS Manager Panel — Railway-ready web panel for managing anytls-go tunnels.",
+  "description": "Nino Dashboard — Lightweight web panel and server management console.",
   "engines": {
     "node": ">=20.0.0"
   },

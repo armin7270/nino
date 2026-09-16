@@ -1,20 +1,8 @@
 # ==============================================================================
-# AnyTLS Manager Panel — production image (Railway ready)
-#
-# Stages:
-#   anytls-bin — fetches the official anytls-go server binary for the target arch
-#   build      — installs dev dependencies and produces dist/ (SPA + server)
-#   runtime    — ships only production dependencies, dist/, and the binary
-#
-# The tunnel binary is baked into the image, so the first boot never depends on
-# GitHub being reachable. If it is missing at runtime the panel also knows how to
-# download it itself (set ANYTLS_AUTO_DOWNLOAD=false to disable that).
+# Nino Dashboard — container image
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# 1. anytls-go server binary
-# ------------------------------------------------------------------------------
-FROM debian:bookworm-slim AS anytls-bin
+FROM debian:bookworm-slim AS core-bin
 
 ARG TARGETARCH=amd64
 ARG ANYTLS_VERSION=v0.0.13
@@ -75,14 +63,14 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-# Production dependencies only (express, archiver, react, ...).
+# Production dependencies only.
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 
-# Built assets + the AnyTLS binary.
+# Built assets and service binaries
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/index.html ./index.html
-COPY --from=anytls-bin /out/anytls-server /usr/local/bin/anytls-server
+COPY --from=core-bin /out/anytls-server /usr/local/bin/anytls-server
 
 # Support files used by the diagnostics view and the legacy Ubuntu ZIP feature.
 COPY server.ts install.sh ./
