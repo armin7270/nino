@@ -55,7 +55,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
-    PORT=3000 \
+    PORT=8080 \
     ANYTLS_GATEWAY_PORT=8443 \
     ANYTLS_VERSION=v0.0.13 \
     DATA_DIR=/data \
@@ -82,12 +82,12 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 
 # The container deliberately runs as root: Railway mounts volumes owned by root,
 # and the panel must be able to create its data directory on any mount.
-# 3000 = web panel (Railway injects $PORT on top of this).
+# 8080 / 3000 = web panel listeners.
 # 8443 = public AnyTLS port — expose it with a Railway TCP Proxy.
-EXPOSE 3000 8443
+EXPOSE 8080 3000 8443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/server.cjs"]

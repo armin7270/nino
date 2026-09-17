@@ -58,8 +58,8 @@ const ANYTLS_VERSION = (process.env.ANYTLS_VERSION || 'v0.0.13').trim();
 const ANYTLS_VERSION_NUM = ANYTLS_VERSION.replace(/^v/, '');
 const SERVER_BINARY_NAME = process.platform === 'win32' ? 'anytls-server.exe' : 'anytls-server';
 
-/** Web panel port. Railway injects PORT. */
-const PORT = Number(process.env.PORT) || 3000;
+/** Web panel port. Railway injects PORT (defaults to 8080). */
+const PORT = Number(process.env.PORT) || 8080;
 
 /**
  * The single public port. This is the value to enter as the "application port"
@@ -1948,6 +1948,22 @@ async function startServer() {
 
     // Bind the public port immediately so the platform can detect and route it.
     startTunnelProxy();
+
+    // Bind fallback ports (8080 / 3000) so that Railway edge routing works regardless of whether
+    // it routes to the injected PORT, 8080, or 3000.
+    const fallbackPorts = [8080, 3000].filter((p) => p !== PORT && p !== GATEWAY_PORT);
+    for (const fp of fallbackPorts) {
+      try {
+        const extraServer = app.listen(fp, '0.0.0.0', () => {
+          console.log(`  Fallback web listener: http://0.0.0.0:${fp}`);
+        });
+        extraServer.on('error', () => {
+          // Port in use or already bound; ignore gracefully
+        });
+      } catch {
+        // ignore
+      }
+    }
 
     ensureAnyTlsBinary()
       .then(() => syncTunnels(loadData()))
