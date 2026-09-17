@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import net from 'net';
+import dns from 'dns';
 import zlib from 'zlib';
 import crypto from 'crypto';
 import { spawn, ChildProcess, exec } from 'child_process';
@@ -58,14 +59,21 @@ const ANYTLS_VERSION = (process.env.ANYTLS_VERSION || 'v0.0.13').trim();
 const ANYTLS_VERSION_NUM = ANYTLS_VERSION.replace(/^v/, '');
 const SERVER_BINARY_NAME = process.platform === 'win32' ? 'anytls-server.exe' : 'anytls-server';
 
-/** Web panel port. Railway injects PORT (defaults to 8080). */
-const PORT = Number(process.env.PORT) || 8080;
-
 /**
- * The single public port. This is the value to enter as the "application port"
- * when creating the Railway TCP Proxy. Override with ANYTLS_GATEWAY_PORT.
+ * The single public port for AnyTLS traffic.
+ * This is the value to enter as the "application port" when creating the Railway TCP Proxy.
+ * Override with ANYTLS_GATEWAY_PORT.
  */
 const GATEWAY_PORT = Number(process.env.ANYTLS_GATEWAY_PORT) || 8443;
+
+/**
+ * Web panel port. Railway injects PORT (defaults to 8080 or 3000).
+ * CRITICAL: Under NO circumstances may the web panel bind to GATEWAY_PORT (8443),
+ * because GATEWAY_PORT must be exclusively owned by anytls-server!
+ * If Railway sets PORT=8443 or PORT is identical to GATEWAY_PORT, redirect Express to 3000.
+ */
+const rawPort = Number(process.env.PORT);
+const PORT = rawPort && rawPort !== GATEWAY_PORT ? rawPort : 3000;
 
 /** First port handed out to per-configuration tunnel processes. */
 const INTERNAL_PORT_BASE = Number(process.env.ANYTLS_INTERNAL_PORT_BASE) || 20100;
@@ -325,6 +333,7 @@ function ensureInternalPorts(data: AppData): boolean {
 // ==============================================================================
 
 let cachedAutoIp = process.env.SERVER_IP || '';
+let cachedTcpIp = '';
 let autoIpDetected = false;
 
 function detectAutoIp(): void {
@@ -353,6 +362,20 @@ function detectAutoIp(): void {
     }
   } catch {
     // ignore
+  }
+
+    const tcpDomain = process.env.RAILWAY_TCP_PROXY_DOMAIN;
+  if (tcpDomain) {
+    dns.promises.lookup(tcpDomain)
+      .then((res) => {
+        if (res && res.address && net.isIP(res.address)) {
+          cachedTcpIp = res.address;
+          console.log(`[AnyTLS] Resolved TCP proxy IP: ${tcpDomain} -> ${res.address}`);
+        }
+      })
+      .catch((err) => {
+        console.warn(`[AnyTLS] TCP proxy DNS lookup error for ${tcpDomain}:`, err.message);
+      });
   }
 
   // Public IP lookup (best effort, never blocks the caller).
@@ -414,7 +437,7 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
 
   // 3. Railway TCP proxy — the address a VPN client must connect to.
   if (tcpDomain && tcpPort) {
-    return { ...base, host: tcpDomain, port: tcpPort, source: 'railway-tcp' };
+    return { ...base, host: cachedTcpIp || tcpDomain, port: tcpPort, source: 'railway-tcp' };
   }
 
   // 4. Railway HTTP domain (TCP proxy not created yet):
@@ -614,7 +637,7 @@ function addProcessLog(configId: string, message: string): void {
 function killPortOccupant(port: number): void {
   if (os.platform() !== 'linux' || !port) return;
   try {
-    exec(`fuser -k ${port}/tcp 2>/dev/null || true`, () => {});
+    exec(`fuser -k ${port}/tcp 2>/dev/null || pkill -f "anytls-server.*:${port}" || true`, () => {});
   } catch {
     // ignore
   }

@@ -51,11 +51,11 @@ FROM node:22-bookworm-slim AS runtime
 # ca-certificates + curl keep the panel's optional runtime download working;
 # tini reaps the anytls-server children so the container stops cleanly.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl tini \
+    && apt-get install -y --no-install-recommends ca-certificates curl tini psmisc procps \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
-    PORT=8080 \
+    PORT=3000 \
     ANYTLS_GATEWAY_PORT=8443 \
     ANYTLS_VERSION=v0.0.13 \
     DATA_DIR=/data \
@@ -84,7 +84,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 # and the panel must be able to create its data directory on any mount.
 # 8080 / 3000 = web panel listeners.
 # 8443 = public AnyTLS port — expose it with a Railway TCP Proxy.
-EXPOSE 8080 3000 8443
+EXPOSE 3000 8080 8443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
