@@ -994,8 +994,6 @@ function startProcessWatchdog(): void {
         }
       }
 
-      // 2. Persist measured traffic
-      flushTraffic();
 
       // 3. Reconcile processes and the public proxy target
       await syncTunnels(data);
@@ -1678,7 +1676,7 @@ function createApp() {
     const info = activeProcesses.get(id);
     const data = loadData();
     const config = data.configs.find((c) => c.id === id);
-    const targetPort = config?.port || info?.port || 0;
+    const targetPort = isRailwayRuntime ? GATEWAY_PORT : (config?.port || info?.port || 0);
 
     const portCheck = await checkPortInListenState(targetPort);
     const endpoint = resolvePublicEndpoint(data);
