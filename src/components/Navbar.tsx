@@ -153,7 +153,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   className="fixed inset-0 z-40"
                   onClick={() => setMenuOpen(false)}
                 />
-                <div className="absolute left-0 mt-2 z-50 w-52 rounded-2xl border border-white/10 bg-[#151515] p-1.5 shadow-2xl shadow-black/80">
+                <div className="absolute right-0 mt-2 z-50 w-52 rounded-2xl border border-white/10 bg-[#151515] p-1.5 shadow-2xl shadow-black/80">
                   <div className="border-b border-white/5 px-3 py-2 text-xs text-white/40">
                     Signed in as <span className="font-semibold text-white">{username}</span>
                   </div>

@@ -204,11 +204,34 @@ function getDefaultData(): AppData {
   };
 }
 
-function loadData(): AppData {
+let cachedData: AppData | null = null;
+let saveLock = false;
+const saveLockQueue: Array<() => void> = [];
+
+function withSaveLock(fn: () => void): void {
+  if (saveLock) {
+    saveLockQueue.push(fn);
+    return;
+  }
+  saveLock = true;
+  try {
+    fn();
+  } finally {
+    saveLock = false;
+    const next = saveLockQueue.shift();
+    if (next) setTimeout(next, 0);
+  }
+}
+
+function loadData(forceDisk = false): AppData {
+  if (!forceDisk && cachedData) {
+    return cachedData;
+  }
   ensureDataDir();
   if (!fs.existsSync(DATA_FILE)) {
     const defaultData = getDefaultData();
     saveData(defaultData);
+    cachedData = defaultData;
     return defaultData;
   }
   try {
@@ -235,23 +258,30 @@ function loadData(): AppData {
 
     if (ensureInternalPorts(parsed)) dirty = true;
 
+    cachedData = parsed;
     if (dirty) saveData(parsed);
     return parsed;
   } catch (err) {
     console.error('Error loading config.json:', err);
-    return getDefaultData();
+    if (cachedData) return cachedData;
+    const defaultData = getDefaultData();
+    cachedData = defaultData;
+    return defaultData;
   }
 }
 
 function saveData(data: AppData): void {
   ensureDataDir();
-  try {
-    const tmp = `${DATA_FILE}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-    fs.renameSync(tmp, DATA_FILE);
-  } catch (err) {
-    console.error('Error saving config.json:', err);
-  }
+  cachedData = data;
+  withSaveLock(() => {
+    try {
+      const tmp = `${DATA_FILE}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
+      fs.renameSync(tmp, DATA_FILE);
+    } catch (err) {
+      console.error('Error saving config.json:', err);
+    }
+  });
 }
 
 /**
@@ -817,40 +847,19 @@ function recordTraffic(configId: string, bytes: number): void {
   pendingBytes.set(configId, (pendingBytes.get(configId) || 0) + bytes);
 }
 
-/** Simple mutex to prevent concurrent writes to config.json. */
-let saveLock = false;
-const saveLockQueue: Array<() => void> = [];
-
-function withSaveLock(fn: () => void): void {
-  if (saveLock) {
-    saveLockQueue.push(fn);
-    return;
-  }
-  saveLock = true;
-  try {
-    fn();
-  } finally {
-    saveLock = false;
-    const next = saveLockQueue.shift();
-    if (next) setTimeout(next, 0);
-  }
-}
-
 function flushTraffic(): void {
   if (pendingBytes.size === 0) return;
-  withSaveLock(() => {
-    const data = loadData();
-    let changed = false;
-    for (const cfg of data.configs) {
-      const bytes = pendingBytes.get(cfg.id);
-      if (bytes) {
-        cfg.trafficUsedBytes += bytes;
-        pendingBytes.delete(cfg.id);
-        changed = true;
-      }
+  const data = loadData();
+  let changed = false;
+  for (const cfg of data.configs) {
+    const bytes = pendingBytes.get(cfg.id);
+    if (bytes) {
+      cfg.trafficUsedBytes += bytes;
+      pendingBytes.delete(cfg.id);
+      changed = true;
     }
-    if (changed) saveData(data);
-  });
+  }
+  if (changed) saveData(data);
 }
 
 function startTunnelProxy(): void {
@@ -865,25 +874,45 @@ function startTunnelProxy(): void {
       return;
     }
 
+    // Check if target is already expired by traffic
+    const targetLimitBytes = target.trafficLimitGB > 0 ? target.trafficLimitGB * 1024 * 1024 * 1024 : 0;
+    if (targetLimitBytes > 0 && target.trafficUsedBytes >= targetLimitBytes) {
+      client.destroy();
+      return;
+    }
+
     const upstream = net.connect(target.port, '127.0.0.1');
-    let transferred = 0;
+    let sessionBytes = 0;
     let closed = false;
 
     const finish = () => {
       if (closed) return;
       closed = true;
-      recordTraffic(target.id, transferred);
+      if (sessionBytes > 0) {
+        recordTraffic(target.id, sessionBytes);
+        sessionBytes = 0;
+      }
       client.destroy();
       upstream.destroy();
     };
 
-    // The proxy must stay byte-transparent: count only, never modify.
-    client.on('data', (chunk: Buffer) => {
-      transferred += chunk.length;
-    });
-    upstream.on('data', (chunk: Buffer) => {
-      transferred += chunk.length;
-    });
+    // Incremental traffic accounting: buffer bytes and record every 64KB
+    const handleChunk = (chunk: Buffer) => {
+      sessionBytes += chunk.length;
+      if (sessionBytes >= 65536) {
+        recordTraffic(target.id, sessionBytes);
+        sessionBytes = 0;
+        if (targetLimitBytes > 0) {
+          const currentTotal = target.trafficUsedBytes + (pendingBytes.get(target.id) || 0);
+          if (currentTotal >= targetLimitBytes) {
+            finish();
+          }
+        }
+      }
+    };
+
+    client.on('data', handleChunk);
+    upstream.on('data', handleChunk);
 
     client.on('error', finish);
     upstream.on('error', finish);
@@ -1031,6 +1060,9 @@ function startProcessWatchdog(): void {
       // 3. Reconcile processes and the public proxy target
       await syncTunnels(data);
 
+      // 4. Clean up expired auth tokens and stale rate-limit entries
+      cleanupStaleSessions();
+
       if (changed) saveData(data);
     } catch (err) {
       console.error('[Watchdog] Error during supervisor cycle:', err);
@@ -1066,9 +1098,81 @@ process.on('SIGINT', () => {
 // HTTP API
 // ==============================================================================
 
-const activeTokens = new Set<string>();
+interface TokenSession {
+  createdAt: number;
+  lastUsedAt: number;
+}
 
-async function startServer() {
+const activeTokens = new Map<string, TokenSession>();
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function isValidToken(token: string): boolean {
+  if (!token) return false;
+  const session = activeTokens.get(token);
+  if (!session) return false;
+  const now = Date.now();
+  if (now - session.createdAt > TOKEN_TTL_MS) {
+    activeTokens.delete(token);
+    return false;
+  }
+  session.lastUsedAt = now;
+  return true;
+}
+
+function cleanupStaleSessions(): void {
+  const now = Date.now();
+  for (const [token, session] of activeTokens.entries()) {
+    if (now - session.createdAt > TOKEN_TTL_MS) {
+      activeTokens.delete(token);
+    }
+  }
+  for (const [ip, entry] of loginAttempts.entries()) {
+    if (entry.resetAt <= now) {
+      loginAttempts.delete(ip);
+    }
+  }
+}
+
+// --------------------------------------------------
+// In-memory rate limiter for the login endpoint
+// --------------------------------------------------
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    loginAttempts.set(ip, { count: 0, resetAt: now + LOGIN_WINDOW_MS });
+    return { allowed: true, retryAfterSec: 0 };
+  }
+  if (entry.count >= LOGIN_MAX_ATTEMPTS) {
+    return { allowed: false, retryAfterSec: Math.ceil((entry.resetAt - now) / 1000) };
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+function recordFailedLogin(ip: string): void {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+  } else {
+    entry.count++;
+  }
+}
+
+function clearLoginAttempts(ip: string): void {
+  loginAttempts.delete(ip);
+}
+
+function verifyPassword(data: AppData, password: string): boolean {
+  if (!password) return false;
+  return hashPassword(password, data.admin.salt) === data.admin.passwordHash;
+}
+
+function createApp() {
   detectAutoIp();
 
   const app = express();
@@ -1076,6 +1180,15 @@ async function startServer() {
 
   app.disable('x-powered-by');
   app.set('trust proxy', true);
+
+  // Essential security headers
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
   app.use(express.json({ limit: '1mb' }));
 
   const requireAuth = (req: Request, res: Response, next: () => void) => {
@@ -1084,20 +1197,13 @@ async function startServer() {
       res.status(401).json({ error: 'Please sign in first' });
       return;
     }
-    if (!activeTokens.has(authHeader.split(' ')[1])) {
-      res.status(401).json({ error: 'Session expired' });
+    const token = authHeader.split(' ')[1];
+    if (!isValidToken(token)) {
+      res.status(401).json({ error: 'Session expired or invalid' });
       return;
     }
     next();
   };
-
-  function verifyPassword(data: AppData, password: string): boolean {
-    if (!password) return false;
-    // Only PBKDF2 is accepted. The legacy SHA-256 path was removed because it
-    // allowed fast brute-force attacks. Passwords stored with SHA-256 were
-    // already migrated to PBKDF2 on the first successful login (see loadData).
-    return hashPassword(password, data.admin.salt) === data.admin.passwordHash;
-  }
 
   // --------------------------------------------------
   // Health & deployment info (public)
@@ -1152,40 +1258,6 @@ async function startServer() {
   });
 
   // --------------------------------------------------
-  // Simple in-memory rate limiter for the login endpoint
-  // --------------------------------------------------
-  const loginAttempts = new Map<string, { count: number; resetAt: number }>();
-  const LOGIN_MAX_ATTEMPTS = 10;
-  const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-
-  function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfterSec: number } {
-    const now = Date.now();
-    const entry = loginAttempts.get(ip);
-    if (!entry || entry.resetAt <= now) {
-      loginAttempts.set(ip, { count: 0, resetAt: now + LOGIN_WINDOW_MS });
-      return { allowed: true, retryAfterSec: 0 };
-    }
-    if (entry.count >= LOGIN_MAX_ATTEMPTS) {
-      return { allowed: false, retryAfterSec: Math.ceil((entry.resetAt - now) / 1000) };
-    }
-    return { allowed: true, retryAfterSec: 0 };
-  }
-
-  function recordFailedLogin(ip: string): void {
-    const now = Date.now();
-    const entry = loginAttempts.get(ip);
-    if (!entry || entry.resetAt <= now) {
-      loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
-    } else {
-      entry.count++;
-    }
-  }
-
-  function clearLoginAttempts(ip: string): void {
-    loginAttempts.delete(ip);
-  }
-
-  // --------------------------------------------------
   // Auth
   // --------------------------------------------------
   app.post('/api/auth/login', (req: Request, res: Response) => {
@@ -1234,7 +1306,7 @@ async function startServer() {
 
     clearLoginAttempts(clientIp);
     const token = crypto.randomBytes(32).toString('hex');
-    activeTokens.add(token);
+    activeTokens.set(token, { createdAt: Date.now(), lastUsedAt: Date.now() });
 
     res.json({ success: true, token, username: data.admin.username });
   });
@@ -1244,7 +1316,7 @@ async function startServer() {
     if (
       !authHeader ||
       !authHeader.startsWith('Bearer ') ||
-      !activeTokens.has(authHeader.split(' ')[1])
+      !isValidToken(authHeader.split(' ')[1])
     ) {
       res.status(401).json({ isLoggedIn: false });
       return;
@@ -1286,6 +1358,8 @@ async function startServer() {
     data.admin.salt = newSalt;
     data.admin.passwordHash = hashPassword(newPassword, newSalt);
     saveData(data);
+    // Invalidate all existing tokens on password change
+    activeTokens.clear();
 
     res.json({ success: true, message: 'Password changed successfully' });
   });
@@ -1348,6 +1422,9 @@ async function startServer() {
     }
 
     saveData(data);
+    if (passwordChanged) {
+      activeTokens.clear();
+    }
     const endpoint = resolvePublicEndpoint(data);
 
     res.json({
@@ -1376,12 +1453,19 @@ async function startServer() {
         cfg.trafficLimitGB > 0 && cfg.trafficUsedBytes >= cfg.trafficLimitGB * 1024 * 1024 * 1024;
       if ((isTimeExpired || isTrafficExpired) && cfg.status === 'active') {
         hasChanges = true;
+        stopAnyTlsServer(cfg.id);
+        activeProcesses.delete(cfg.id);
         return { ...cfg, status: 'expired' as const };
       }
       return cfg;
     });
 
-    if (hasChanges) saveData(data);
+    if (hasChanges) {
+      saveData(data);
+      if (data.gateway?.activeConfigId && !pickGatewayConfig(data)) {
+        data.gateway.activeConfigId = null;
+      }
+    }
 
     const endpoint = resolvePublicEndpoint(data);
     const activeGatewayId = pickGatewayConfig(data)?.id ?? null;
@@ -1425,31 +1509,33 @@ async function startServer() {
       return;
     }
 
+    const cleanRemark = String(remark).trim().slice(0, 100);
+    const cleanTrafficLimit = Math.max(0, Math.min(1000000, Number(trafficLimitGB) || 0));
+    const cleanExpireDays = Math.max(0, Math.min(3650, Number(expireDays) || 0));
     const data = loadData();
     const now = new Date();
-    const daysNum = Number(expireDays);
     const expireAt =
-      daysNum > 0 ? new Date(now.getTime() + daysNum * 24 * 60 * 60 * 1000).toISOString() : null;
+      cleanExpireDays > 0 ? new Date(now.getTime() + cleanExpireDays * 24 * 60 * 60 * 1000).toISOString() : null;
 
     const finalPassword =
       password && String(password).trim()
-        ? String(password).trim()
+        ? String(password).trim().slice(0, 128)
         : crypto.randomBytes(12).toString('base64url');
 
     const newConfig: StoredConfig = {
       id: 'cfg-' + crypto.randomBytes(6).toString('hex'),
-      remark: String(remark).trim(),
+      remark: cleanRemark,
       port: 0, // assigned by ensureInternalPorts below
       password: finalPassword,
-      sni: typeof sni === 'string' ? sni.trim() : '',
-      trafficLimitGB: Number(trafficLimitGB) || 0,
+      sni: typeof sni === 'string' ? sni.trim().slice(0, 255) : '',
+      trafficLimitGB: cleanTrafficLimit,
       trafficUsedBytes: 0,
-      expireDays: daysNum,
+      expireDays: cleanExpireDays,
       expireAt,
       createdAt: now.toISOString(),
       status: 'active',
       insecure: insecure !== false,
-      notes: notes ? String(notes).trim() : '',
+      notes: notes ? String(notes).trim().slice(0, 1000) : '',
     };
 
     data.configs.unshift(newConfig);
@@ -1492,15 +1578,15 @@ async function startServer() {
       return;
     }
 
-    if (remark) current.remark = String(remark).trim();
-    if (password) current.password = String(password).trim();
-    if (sni !== undefined) current.sni = typeof sni === 'string' ? sni.trim() : '';
-    if (notes !== undefined) current.notes = String(notes).trim();
+    if (remark) current.remark = String(remark).trim().slice(0, 100);
+    if (password) current.password = String(password).trim().slice(0, 128);
+    if (sni !== undefined) current.sni = typeof sni === 'string' ? sni.trim().slice(0, 255) : '';
+    if (notes !== undefined) current.notes = String(notes).trim().slice(0, 1000);
     if (insecure !== undefined) current.insecure = Boolean(insecure);
-    if (trafficLimitGB !== undefined) current.trafficLimitGB = Number(trafficLimitGB);
+    if (trafficLimitGB !== undefined) current.trafficLimitGB = Math.max(0, Math.min(1000000, Number(trafficLimitGB) || 0));
 
     if (expireDays !== undefined) {
-      const daysNum = Number(expireDays);
+      const daysNum = Math.max(0, Math.min(3650, Number(expireDays) || 0));
       current.expireDays = daysNum;
       if (daysNum > 0) {
         const createdTime = new Date(current.createdAt).getTime();
@@ -1844,6 +1930,12 @@ async function startServer() {
     res.status(500).json({ error: 'Internal server error' });
   });
 
+  return app;
+}
+
+async function startServer() {
+  const app = createApp();
+
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('==============================================================');
     console.log('  AnyTLS Manager Panel');
@@ -1878,9 +1970,33 @@ async function startServer() {
   process.on('uncaughtException', (err) => {
     console.error('[Panel] Uncaught exception:', err);
   });
+
+  return server;
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+export {
+  createApp,
+  startServer,
+  loadData,
+  saveData,
+  hashPassword,
+  verifyPassword,
+  ensureInternalPorts,
+  pickGatewayConfig,
+  resolvePublicEndpoint,
+  startTunnelProxy,
+  stopAnyTlsServer,
+  syncTunnels,
+  shutdown,
+};
+
+const isTestEnv =
+  process.env.NODE_ENV === 'test' ||
+  process.argv.some((arg) => arg.includes('test') || arg.includes('tests'));
+
+if (!isTestEnv) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}

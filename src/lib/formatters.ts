@@ -123,5 +123,16 @@ export function formatDate(isoDate: string | null): string {
   }
 }
 
-// Backward compatibility alias
-export const formatDateToPersian = formatDate;
+export function formatDateToPersian(isoDate: string | null): string {
+  if (!isoDate) return 'نامحدود';
+  try {
+    const date = new Date(isoDate);
+    return new Intl.DateTimeFormat('fa-IR-u-ca-persian', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    }).format(date);
+  } catch {
+    return isoDate || 'نامحدود';
+  }
+}

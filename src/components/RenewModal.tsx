@@ -20,6 +20,7 @@ export const RenewModal: React.FC<RenewModalProps> = ({
   const [addTrafficGB, setAddTrafficGB] = useState<number>(0);
   const [resetTraffic, setResetTraffic] = useState<boolean>(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   if (!isOpen || !config) return null;
 
@@ -27,6 +28,7 @@ export const RenewModal: React.FC<RenewModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage('');
     setIsSubmitting(true);
     try {
       await onRenew(config.id, {
@@ -36,7 +38,7 @@ export const RenewModal: React.FC<RenewModalProps> = ({
       });
       onClose();
     } catch (err: any) {
-      alert(err.message || 'Error renewing configuration');
+      setErrorMessage(err.message || 'Error renewing configuration');
     } finally {
       setIsSubmitting(false);
     }
@@ -70,6 +72,11 @@ export const RenewModal: React.FC<RenewModalProps> = ({
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm">
+          {errorMessage && (
+            <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-400">
+              {errorMessage}
+            </div>
+          )}
           {/* Add Days */}
           <div>
             <label className="block text-xs font-medium text-white/60 mb-1.5">
