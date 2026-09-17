@@ -779,7 +779,7 @@ async function startAnyTlsServer(
   try {
     // In Railway mode, bind 0.0.0.0:GATEWAY_PORT directly so Railway TCP Proxy routes directly to anytls-server.
     // In standalone VPS mode, bind 0.0.0.0:port directly.
-    const bindAddr = `0.0.0.0:${listenPort}`;
+    const bindAddr = `:${listenPort}`;
 
     addProcessLog(config.id, `Starting: ${binaryPath} -l ${bindAddr} -p ******`);
     console.log(`[AnyTLS] Spawning ${binaryPath} -l ${bindAddr} for "${config.remark}"`);
@@ -789,7 +789,7 @@ async function startAnyTlsServer(
       detached: false,
       env: {
         ...process.env,
-        LOG_LEVEL: process.env.ANYTLS_LOG_LEVEL || process.env.LOG_LEVEL || 'info',
+        LOG_LEVEL: process.env.ANYTLS_LOG_LEVEL || process.env.LOG_LEVEL || 'debug',
       },
     });
 
