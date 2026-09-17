@@ -8,6 +8,7 @@ export interface PublicEndpoint {
   panelDomain?: string | null;
   tcpDomain?: string | null;
   tcpPort?: number | null;
+  tcpIp?: string | null;
   gatewayPort?: number;
   tcpProxyConfigured?: boolean;
 }

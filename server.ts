@@ -336,7 +336,64 @@ let cachedAutoIp = process.env.SERVER_IP || '';
 let cachedTcpIp = '';
 let autoIpDetected = false;
 
+async function resolveDomainToIp(domain: string): Promise<string | null> {
+  // 1. Try system DNS lookup (filter out known Iranian censorship sinkhole IPs like 10.10.34.36)
+  try {
+    const res = await dns.promises.lookup(domain, { family: 4 });
+    if (res && res.address && net.isIP(res.address)) {
+      const isSinkhole = res.address.startsWith('10.10.') || res.address === '127.0.0.1';
+      if (!isSinkhole) {
+        return res.address;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. Fallback to Cloudflare DNS-over-HTTPS (DoH)
+  try {
+    const cfRes = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=A`, {
+      headers: { accept: 'application/dns-json' },
+    });
+    if (cfRes.ok) {
+      const data: any = await cfRes.json();
+      const answer = data.Answer?.find((a: any) => a.type === 1 && a.data && net.isIP(a.data));
+      if (answer) return answer.data;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. Fallback to Google DNS-over-HTTPS
+  try {
+    const gRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=A`);
+    if (gRes.ok) {
+      const data: any = await gRes.json();
+      const answer = data.Answer?.find((a: any) => a.type === 1 && a.data && net.isIP(a.data));
+      if (answer) return answer.data;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
 function detectAutoIp(): void {
+  const tcpDomain = process.env.RAILWAY_TCP_PROXY_DOMAIN;
+  if (tcpDomain && !cachedTcpIp) {
+    resolveDomainToIp(tcpDomain)
+      .then((ip) => {
+        if (ip) {
+          cachedTcpIp = ip;
+          console.log(`[AnyTLS] Resolved TCP proxy IP: ${tcpDomain} -> ${ip}`);
+        }
+      })
+      .catch((err) => {
+        console.warn(`[AnyTLS] TCP proxy DNS lookup error for ${tcpDomain}:`, err.message);
+      });
+  }
+
   if (autoIpDetected && cachedAutoIp) return;
   autoIpDetected = true;
 
@@ -346,7 +403,6 @@ function detectAutoIp(): void {
     process.env.RAILWAY_PUBLIC_DOMAIN;
   if (fromEnv) {
     cachedAutoIp = fromEnv;
-    return;
   }
 
   // Local interface fallback (works even when outbound HTTP is blocked).
@@ -355,7 +411,7 @@ function detectAutoIp(): void {
     for (const name of Object.keys(ifaces)) {
       for (const iface of ifaces[name] || []) {
         if (!iface.internal && iface.family === 'IPv4') {
-          cachedAutoIp = iface.address;
+          if (!cachedAutoIp) cachedAutoIp = iface.address;
           return;
         }
       }
@@ -364,31 +420,17 @@ function detectAutoIp(): void {
     // ignore
   }
 
-    const tcpDomain = process.env.RAILWAY_TCP_PROXY_DOMAIN;
-  if (tcpDomain) {
-    dns.promises.lookup(tcpDomain)
-      .then((res) => {
-        if (res && res.address && net.isIP(res.address)) {
-          cachedTcpIp = res.address;
-          console.log(`[AnyTLS] Resolved TCP proxy IP: ${tcpDomain} -> ${res.address}`);
-        }
-      })
-      .catch((err) => {
-        console.warn(`[AnyTLS] TCP proxy DNS lookup error for ${tcpDomain}:`, err.message);
-      });
-  }
-
   // Public IP lookup (best effort, never blocks the caller).
   fetch('https://api.ipify.org?format=json')
     .then((r) => r.json())
     .then((res: any) => {
-      if (res && res.ip) cachedAutoIp = res.ip;
+      if (res && res.ip && !cachedAutoIp) cachedAutoIp = res.ip;
     })
     .catch(() => {
       try {
         exec('curl -s -4 --max-time 5 https://api.ipify.org', (err, stdout) => {
           const ip = (stdout || '').trim();
-          if (!err && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) cachedAutoIp = ip;
+          if (!err && /^\d+\.\d+\.\d+\.\d+$/.test(ip) && !cachedAutoIp) cachedAutoIp = ip;
         });
       } catch {
         // ignore
@@ -397,6 +439,8 @@ function detectAutoIp(): void {
 }
 
 function resolvePublicEndpoint(data: AppData): PublicEndpoint {
+  detectAutoIp();
+
   const tcpDomain = process.env.RAILWAY_TCP_PROXY_DOMAIN || null;
   const tcpPort = Number(process.env.RAILWAY_TCP_PROXY_PORT) || null;
   const panelDomain = process.env.RAILWAY_PUBLIC_DOMAIN || null;
@@ -405,13 +449,16 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
   const manualHost = (data.serverIp || '').trim();
   const manualPort = Number(data.panelPort) || 0;
 
-  const base = {
+  const base: PublicEndpoint = {
+    host: '',
+    port: 0,
     manualHost,
     manualPort,
     autoIp: cachedAutoIp,
     panelDomain,
     tcpDomain,
     tcpPort,
+    tcpIp: cachedTcpIp || null,
     gatewayPort: GATEWAY_PORT,
     tcpProxyConfigured,
   };
@@ -436,8 +483,14 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
   }
 
   // 3. Railway TCP proxy — the address a VPN client must connect to.
+  // Use direct IPv4 if resolved (essential to circumvent Iranian DNS poisoning of railway domains).
   if (tcpDomain && tcpPort) {
-    return { ...base, host: cachedTcpIp || tcpDomain, port: tcpPort, source: 'railway-tcp' };
+    return {
+      ...base,
+      host: cachedTcpIp || tcpDomain,
+      port: tcpPort,
+      source: 'railway-tcp',
+    };
   }
 
   // 4. Railway HTTP domain (TCP proxy not created yet):
@@ -779,7 +832,7 @@ async function startAnyTlsServer(
   try {
     // In Railway mode, bind 0.0.0.0:GATEWAY_PORT directly so Railway TCP Proxy routes directly to anytls-server.
     // In standalone VPS mode, bind 0.0.0.0:port directly.
-    const bindAddr = `:${listenPort}`;
+    const bindAddr = `0.0.0.0:${listenPort}`;
 
     addProcessLog(config.id, `Starting: ${binaryPath} -l ${bindAddr} -p ******`);
     console.log(`[AnyTLS] Spawning ${binaryPath} -l ${bindAddr} for "${config.remark}"`);
@@ -1762,6 +1815,50 @@ function createApp() {
       onRailway: isRailwayRuntime,
       binaryDownloadState,
     });
+  });
+
+  // Diagnostic tunnel verification: validates that anytls-server on GATEWAY_PORT accepts TLS
+  app.get('/api/server/test-tunnel', requireAuth, async (req: Request, res: Response) => {
+    const data = loadData();
+    const targetConfig = pickGatewayConfig(data);
+    const start = Date.now();
+    const tls = await import('tls');
+
+    try {
+      const result = await new Promise<{ success: boolean; error?: string; latencyMs: number }>((resolve) => {
+        const socket = tls.connect(
+          {
+            host: '127.0.0.1',
+            port: GATEWAY_PORT,
+            rejectUnauthorized: false,
+            servername: targetConfig?.sni || 'localhost',
+            timeout: 3000,
+          },
+          () => {
+            const latencyMs = Date.now() - start;
+            socket.destroy();
+            resolve({ success: true, latencyMs });
+          }
+        );
+
+        socket.on('error', (err) => {
+          resolve({ success: false, error: err.message, latencyMs: Date.now() - start });
+        });
+
+        socket.on('timeout', () => {
+          socket.destroy();
+          resolve({ success: false, error: 'Connection timed out', latencyMs: Date.now() - start });
+        });
+      });
+
+      res.json({
+        ...result,
+        gatewayPort: GATEWAY_PORT,
+        activeConfig: targetConfig ? { id: targetConfig.id, remark: targetConfig.remark } : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   // --------------------------------------------------

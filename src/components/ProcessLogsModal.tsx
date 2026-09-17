@@ -156,7 +156,7 @@ export const ProcessLogsModal: React.FC<ProcessLogsModalProps> = ({
             <div className="rounded-xl border border-white/5 bg-[#0a0a0a] p-3">
               <div className="text-[11px] text-white/40">Listening Port</div>
               <div className="text-sm font-mono text-amber-400 mt-1">
-                127.0.0.1:{listenPort}
+                {details?.isGateway ? '0.0.0.0' : '127.0.0.1'}:{listenPort}
               </div>
             </div>
 
@@ -213,7 +213,7 @@ export const ProcessLogsModal: React.FC<ProcessLogsModalProps> = ({
               </button>
             </div>
             <div className="font-mono text-xs text-emerald-400 bg-black/60 p-2.5 rounded-lg border border-white/5 overflow-x-auto select-all">
-              {details?.binaryPath || 'anytls-server'} -l 127.0.0.1:{listenPort} -p {'•'.repeat(Math.min(config.password.length, 12))}
+              {details?.binaryPath || 'anytls-server'} -l {details?.isGateway ? '0.0.0.0' : '127.0.0.1'}:{listenPort} -p {'•'.repeat(Math.min(config.password.length, 12))}
             </div>
 
             {/* Kernel Socket LISTEN Verification */}
