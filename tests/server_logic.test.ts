@@ -1,3 +1,4 @@
+import { resolvePublicEndpoint } from '../server.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -176,4 +177,33 @@ test('Atomic file write prevents partially written or corrupted JSON data', () =
 
   // Clean up
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('resolvePublicEndpoint handles Railway TCP Proxy and domain routing correctly', () => {
+    const dummyData = { serverIp: '', panelPort: 0, configs: [] };
+
+  // Case 1: TCP Proxy env vars present
+  process.env.RAILWAY_TCP_PROXY_DOMAIN = 'viaduct.proxy.rlwy.net';
+  process.env.RAILWAY_TCP_PROXY_PORT = '49182';
+  process.env.RAILWAY_PUBLIC_DOMAIN = 'nino.up.railway.app';
+  
+  const epTcp = resolvePublicEndpoint(dummyData);
+  assert.equal(epTcp.host, 'viaduct.proxy.rlwy.net');
+  assert.equal(epTcp.port, 49182);
+  assert.equal(epTcp.source, 'railway-tcp');
+  assert.equal(epTcp.tcpProxyConfigured, true);
+
+  // Case 2: Only Railway HTTP domain present (before TCP proxy created)
+  delete process.env.RAILWAY_TCP_PROXY_DOMAIN;
+  delete process.env.RAILWAY_TCP_PROXY_PORT;
+  process.env.RAILWAY_PUBLIC_DOMAIN = 'nino.up.railway.app';
+
+  const epDomain = resolvePublicEndpoint(dummyData);
+  assert.equal(epDomain.host, 'nino.up.railway.app');
+  assert.equal(epDomain.port, 8443); // Must be GATEWAY_PORT, not 443!
+  assert.equal(epDomain.source, 'railway-domain');
+  assert.equal(epDomain.tcpProxyConfigured, false);
+
+  // Clean up env vars
+  delete process.env.RAILWAY_PUBLIC_DOMAIN;
 });

@@ -157,6 +157,7 @@ interface PublicEndpoint {
   tcpPort: number | null;
   /** Internal port the TCP proxy must forward to. */
   gatewayPort: number;
+  tcpProxyConfigured: boolean;
 }
 
 const activeProcesses = new Map<string, ProcessInfo>();
@@ -376,6 +377,7 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
   const tcpDomain = process.env.RAILWAY_TCP_PROXY_DOMAIN || null;
   const tcpPort = Number(process.env.RAILWAY_TCP_PROXY_PORT) || null;
   const panelDomain = process.env.RAILWAY_PUBLIC_DOMAIN || null;
+  const tcpProxyConfigured = Boolean(tcpDomain && tcpPort);
 
   const manualHost = (data.serverIp || '').trim();
   const manualPort = Number(data.panelPort) || 0;
@@ -388,6 +390,7 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
     tcpDomain,
     tcpPort,
     gatewayPort: GATEWAY_PORT,
+    tcpProxyConfigured,
   };
 
   // 1. Explicit environment override always wins.
@@ -414,9 +417,10 @@ function resolvePublicEndpoint(data: AppData): PublicEndpoint {
     return { ...base, host: tcpDomain, port: tcpPort, source: 'railway-tcp' };
   }
 
-  // 4. Railway HTTP domain (TCP proxy not created yet, or intentionally unused).
+  // 4. Railway HTTP domain (TCP proxy not created yet):
+  // NOTE: AnyTLS traffic cannot route through Railway HTTP port 443. Target port is GATEWAY_PORT (8443).
   if (panelDomain) {
-    return { ...base, host: panelDomain, port: 443, source: 'railway-domain' };
+    return { ...base, host: panelDomain, port: GATEWAY_PORT, source: 'railway-domain' };
   }
 
   // 5. Last resort: detected IP / configured host.
@@ -687,9 +691,10 @@ async function startAnyTlsServer(
   config: StoredConfig,
   options: { force?: boolean } = {}
 ): Promise<boolean> {
-  const listenPort = config.port;
+  const isGateway = isRailwayRuntime;
+  const listenPort = isGateway ? GATEWAY_PORT : (config.port || GATEWAY_PORT);
   if (!listenPort) {
-    console.error(`[AnyTLS] Configuration ${config.id} has no internal port assigned`);
+    console.error(`[AnyTLS] Configuration ${config.id} has no port assigned`);
     return false;
   }
 
@@ -749,8 +754,9 @@ async function startAnyTlsServer(
   }
 
   try {
-    // Tunnels only need to be reachable from the local proxy, so bind loopback.
-    const bindAddr = `127.0.0.1:${listenPort}`;
+    // In Railway mode, bind 0.0.0.0:GATEWAY_PORT directly so Railway TCP Proxy routes directly to anytls-server.
+    // In standalone VPS mode, bind 0.0.0.0:port directly.
+    const bindAddr = `0.0.0.0:${listenPort}`;
 
     addProcessLog(config.id, `Starting: ${binaryPath} -l ${bindAddr} -p ******`);
     console.log(`[AnyTLS] Spawning ${binaryPath} -l ${bindAddr} for "${config.remark}"`);
@@ -835,125 +841,16 @@ async function startAnyTlsServer(
 // Public TCP proxy (the single Railway TCP proxy target)
 // ==============================================================================
 
-let tunnelProxy: net.Server | null = null;
-let tunnelProxyListening = false;
-let proxyRetries = 0;
-
-/** Maximum number of automatic retries when the public port is still in use. */
-const PROXY_MAX_RETRIES = 5;
-
-function recordTraffic(configId: string, bytes: number): void {
-  if (bytes <= 0) return;
-  pendingBytes.set(configId, (pendingBytes.get(configId) || 0) + bytes);
-}
-
-function flushTraffic(): void {
-  if (pendingBytes.size === 0) return;
-  const data = loadData();
-  let changed = false;
-  for (const cfg of data.configs) {
-    const bytes = pendingBytes.get(cfg.id);
-    if (bytes) {
-      cfg.trafficUsedBytes += bytes;
-      pendingBytes.delete(cfg.id);
-      changed = true;
-    }
+function isGatewayRunning(): boolean {
+  if (!isRailwayRuntime) {
+    return Array.from(activeProcesses.values()).some((p) => p.status === 'running');
   }
-  if (changed) saveData(data);
+  const data = loadData();
+  const target = pickGatewayConfig(data);
+  if (!target) return false;
+  const proc = activeProcesses.get(target.id);
+  return Boolean(proc && proc.status === 'running' && proc.process);
 }
-
-function startTunnelProxy(): void {
-  if (tunnelProxy) return;
-
-  tunnelProxy = net.createServer((client: net.Socket) => {
-    const target = pickGatewayConfig(loadData());
-
-    // Nothing is exposed yet: destroy quietly so the port still looks live.
-    if (!target || !target.port) {
-      client.destroy();
-      return;
-    }
-
-    // Check if target is already expired by traffic
-    const targetLimitBytes = target.trafficLimitGB > 0 ? target.trafficLimitGB * 1024 * 1024 * 1024 : 0;
-    if (targetLimitBytes > 0 && target.trafficUsedBytes >= targetLimitBytes) {
-      client.destroy();
-      return;
-    }
-
-    const upstream = net.connect(target.port, '127.0.0.1');
-    let sessionBytes = 0;
-    let closed = false;
-
-    const finish = () => {
-      if (closed) return;
-      closed = true;
-      if (sessionBytes > 0) {
-        recordTraffic(target.id, sessionBytes);
-        sessionBytes = 0;
-      }
-      client.destroy();
-      upstream.destroy();
-    };
-
-    // Incremental traffic accounting: buffer bytes and record every 64KB
-    const handleChunk = (chunk: Buffer) => {
-      sessionBytes += chunk.length;
-      if (sessionBytes >= 65536) {
-        recordTraffic(target.id, sessionBytes);
-        sessionBytes = 0;
-        if (targetLimitBytes > 0) {
-          const currentTotal = target.trafficUsedBytes + (pendingBytes.get(target.id) || 0);
-          if (currentTotal >= targetLimitBytes) {
-            finish();
-          }
-        }
-      }
-    };
-
-    client.on('data', handleChunk);
-    upstream.on('data', handleChunk);
-
-    client.on('error', finish);
-    upstream.on('error', finish);
-    client.on('close', finish);
-    upstream.on('close', finish);
-
-    client.pipe(upstream);
-    upstream.pipe(client);
-  });
-
-  tunnelProxy.on('error', (err: any) => {
-    tunnelProxyListening = false;
-    tunnelProxy = null;
-    console.error(`[AnyTLS] Public TCP proxy failed on port ${GATEWAY_PORT}:`, err.message);
-
-    if (err.code === 'EADDRINUSE' && proxyRetries < PROXY_MAX_RETRIES) {
-      proxyRetries++;
-      // Wait for the port to be released (e.g. a previous container draining).
-      setTimeout(() => startTunnelProxy(), 3000);
-      return;
-    }
-
-    if (err.code === 'EADDRINUSE') {
-      console.error(
-        `[AnyTLS] Giving up on port ${GATEWAY_PORT} after ${PROXY_MAX_RETRIES} attempts. ` +
-          'Another process is using it — set ANYTLS_GATEWAY_PORT to a free port and make the ' +
-          'Railway TCP Proxy target that port instead.'
-      );
-    }
-  });
-
-  tunnelProxy.listen(GATEWAY_PORT, '0.0.0.0', () => {
-    tunnelProxyListening = true;
-    proxyRetries = 0;
-    console.log(`[AnyTLS] Public TCP proxy listening on 0.0.0.0:${GATEWAY_PORT}`);
-  });
-}
-
-// ==============================================================================
-// Reconciliation
-// ==============================================================================
 
 function pickGatewayConfig(data: AppData): StoredConfig | null {
   const stored = data.gateway?.activeConfigId;
@@ -976,15 +873,6 @@ async function syncTunnels(data?: AppData): Promise<void> {
     current.configs.filter((c) => c.status === 'active').map((c) => c.id)
   );
 
-  // Stop anything that is no longer active, was removed, or moved port.
-  for (const [id, info] of Array.from(activeProcesses.entries())) {
-    const cfg = current.configs.find((c) => c.id === id);
-    if (!activeIds.has(id) || !cfg || cfg.port !== info.port) {
-      stopAnyTlsServer(id);
-      activeProcesses.delete(id);
-    }
-  }
-
   const target = pickGatewayConfig(current);
   if (current.gateway && current.gateway.activeConfigId !== (target?.id ?? null)) {
     current.gateway.activeConfigId = target?.id ?? null;
@@ -995,19 +883,45 @@ async function syncTunnels(data?: AppData): Promise<void> {
   const binary = await ensureAnyTlsBinary();
   if (!binary) return;
 
-  for (const cfg of current.configs) {
-    if (cfg.status !== 'active') continue;
-    const info = activeProcesses.get(cfg.id);
-    const healthy =
-      info &&
-      info.process &&
-      info.process.exitCode === null &&
-      info.status === 'running' &&
-      info.port === cfg.port;
-    if (!healthy) await startAnyTlsServer(cfg);
+  if (isRailwayRuntime) {
+    for (const [id] of Array.from(activeProcesses.entries())) {
+      if (id !== target?.id) {
+        stopAnyTlsServer(id);
+        activeProcesses.delete(id);
+      }
+    }
+    if (target && target.status === 'active') {
+      const info = activeProcesses.get(target.id);
+      const healthy =
+        info &&
+        info.process &&
+        info.process.exitCode === null &&
+        info.status === 'running' &&
+        info.port === GATEWAY_PORT;
+      if (!healthy) {
+        await startAnyTlsServer(target);
+      }
+    }
+  } else {
+    for (const [id, info] of Array.from(activeProcesses.entries())) {
+      const cfg = current.configs.find((c) => c.id === id);
+      if (!activeIds.has(id) || !cfg || cfg.port !== info.port) {
+        stopAnyTlsServer(id);
+        activeProcesses.delete(id);
+      }
+    }
+    for (const cfg of current.configs) {
+      if (cfg.status !== 'active') continue;
+      const info = activeProcesses.get(cfg.id);
+      const healthy =
+        info &&
+        info.process &&
+        info.process.exitCode === null &&
+        info.status === 'running' &&
+        info.port === cfg.port;
+      if (!healthy) await startAnyTlsServer(cfg);
+    }
   }
-
-  startTunnelProxy();
 }
 
 /** Points the public port at a different configuration (instant, no restart). */
@@ -1018,7 +932,10 @@ function activateGatewayConfig(config: StoredConfig, data: AppData): void {
   data.gateway.activeConfigId = config.id;
   data.gateway.updatedAt = new Date().toISOString();
   saveData(data);
-  console.log(`[AnyTLS] Public port now serves "${config.remark}" (${config.id})`);
+  console.log(`[AnyTLS] Public gateway now serves "${config.remark}" (${config.id}) on port ${GATEWAY_PORT}`);
+  if (isRailwayRuntime) {
+    syncTunnels(data).catch((err) => console.error('[AnyTLS] Resync error on gateway switch:', err));
+  }
 }
 
 // ==============================================================================
@@ -1073,7 +990,6 @@ function startProcessWatchdog(): void {
 function shutdown(): void {
   if (watchdogTimer) clearInterval(watchdogTimer);
   try {
-    tunnelProxy?.close();
   } catch {
     // ignore
   }
@@ -1213,7 +1129,7 @@ function createApp() {
       ok: true,
       status: 'healthy',
       uptimeSeconds: Math.round(process.uptime()),
-      publicPortListening: tunnelProxyListening,
+      publicPortListening: isGatewayRunning(),
       timestamp: new Date().toISOString(),
     });
   });
@@ -1238,7 +1154,7 @@ function createApp() {
       onRailway: isRailwayRuntime,
       panelPort: PORT,
       gatewayPort: GATEWAY_PORT,
-      publicPortListening: tunnelProxyListening,
+      publicPortListening: isGatewayRunning(),
       publicEndpoint: resolvePublicEndpoint(data),
       tcpProxyConfigured: Boolean(
         process.env.RAILWAY_TCP_PROXY_DOMAIN && process.env.RAILWAY_TCP_PROXY_PORT
@@ -1487,7 +1403,7 @@ function createApp() {
       serverIp: endpoint.host,
       publicEndpoint: endpoint,
       gatewayConfigId: activeGatewayId,
-      publicPortListening: tunnelProxyListening,
+      publicPortListening: isGatewayRunning(),
       binaryInstalled: Boolean(findSystemBinary()),
       binaryDownloadState,
     });
@@ -1757,7 +1673,7 @@ function createApp() {
       publicHost: endpoint.host,
       publicPort: endpoint.port,
       gatewayPort: GATEWAY_PORT,
-      publicPortListening: tunnelProxyListening,
+      publicPortListening: isGatewayRunning(),
       isListening: portCheck.isListening,
       listenDetails: portCheck.details,
       startedAt: info?.startedAt,
@@ -1814,7 +1730,7 @@ function createApp() {
       publicEndpoint: endpoint,
       gatewayPort: GATEWAY_PORT,
       gatewayConfigId: pickGatewayConfig(data)?.id ?? null,
-      gatewayRunning: tunnelProxyListening,
+      gatewayRunning: isGatewayRunning(),
       runningTunnels,
       anytlsInstalled: Boolean(findSystemBinary()),
       anytlsVersion: `${ANYTLS_VERSION} (anytls-go)`,
@@ -1946,8 +1862,6 @@ async function startServer() {
     console.log(`  Railway mode : ${isRailwayRuntime ? 'yes' : 'no'}`);
     console.log('==============================================================');
 
-    // Bind the public port immediately so the platform can detect and route it.
-    startTunnelProxy();
 
     // Bind fallback ports (8080 / 3000) so that Railway edge routing works regardless of whether
     // it routes to the injected PORT, 8080, or 3000.
@@ -2000,7 +1914,6 @@ export {
   ensureInternalPorts,
   pickGatewayConfig,
   resolvePublicEndpoint,
-  startTunnelProxy,
   stopAnyTlsServer,
   syncTunnels,
   shutdown,

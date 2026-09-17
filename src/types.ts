@@ -9,6 +9,7 @@ export interface PublicEndpoint {
   tcpDomain?: string | null;
   tcpPort?: number | null;
   gatewayPort?: number;
+  tcpProxyConfigured?: boolean;
 }
 
 export interface AnyTlsConfig {
