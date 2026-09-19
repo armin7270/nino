@@ -154,7 +154,7 @@ interface ProcessInfo {
 interface PublicEndpoint {
   host: string;
   port: number;
-  source: 'manual' | 'railway-tcp' | 'railway-domain' | 'auto';
+  source?: 'manual' | 'railway-tcp' | 'railway-domain' | 'auto';
   manualHost: string;
   manualPort: number;
   autoIp: string;
@@ -163,6 +163,7 @@ interface PublicEndpoint {
   /** Railway TCP proxy host/port (e.g. shuttle.proxy.rlwy.net:15140). */
   tcpDomain: string | null;
   tcpPort: number | null;
+  tcpIp?: string | null;
   /** Internal port the TCP proxy must forward to. */
   gatewayPort: number;
   tcpProxyConfigured: boolean;

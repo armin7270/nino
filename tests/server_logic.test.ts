@@ -180,7 +180,12 @@ test('Atomic file write prevents partially written or corrupted JSON data', () =
 });
 
 test('resolvePublicEndpoint handles Railway TCP Proxy and domain routing correctly', () => {
-    const dummyData = { serverIp: '', panelPort: 0, configs: [] };
+  const dummyData = {
+    admin: { username: 'admin', passwordHash: '', salt: '' },
+    serverIp: '',
+    panelPort: 0,
+    configs: [],
+  };
 
   // Case 1: TCP Proxy env vars present
   process.env.RAILWAY_TCP_PROXY_DOMAIN = 'viaduct.proxy.rlwy.net';
